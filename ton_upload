@@ -1,0 +1,274 @@
+#!/usr/bin/env ruby -KU -rubygems
+
+# The TON API requires application-only authentication
+#
+# Documentation for doing application-only auth using the Twitter API:
+#   https://dev.twitter.com/docs/auth/application-only-auth and
+#   https://dev.twitter.com/docs/api/1.1/post/oauth2/token
+
+require 'bundler/setup'
+
+require 'digest/md5'
+require 'json'
+require 'logger'
+require 'mime/types'
+require 'oauth'
+require 'rest_client'
+require 'twurl'
+require 'time'
+require 'optparse'
+
+RestClient.log = Logger.new(STDERR)
+
+API_DOMAIN = "ton.twitter.com"
+
+CONSUMER_KEY = begin
+  profile = Twurl::RCFile.load["configuration"]
+  key = profile["default_profile"][1]
+  key.nil? ? nil : key
+end
+
+CONSUMER_SECRET = begin
+  name, profiles = Twurl::RCFile.load["profiles"].detect {|k, v| v.include?(CONSUMER_KEY) }
+  profiles.nil? ? nil : profiles[CONSUMER_KEY]["consumer_secret"]
+end
+
+MISSING_SECRET_ERROR = "Your ~/.twurlrc does not contain a consumer secret " +
+  "for the test application (#{CONSUMER_KEY}). Follow the twurl setup " +
+  "instructions and try again."
+
+# This can go upto 1024*1024*64
+SINGLE_CHUNK_UPLOAD_LIMIT_IN_BYTES = 1024*1024*32
+
+EXPIRE_TIME = (Time.now + 10*24*60*60).httpdate
+
+def get_basic_authorization_header
+  credentials = "#{CONSUMER_KEY}:#{CONSUMER_SECRET}"
+  "Basic #{Base64.encode64(credentials).gsub("\n", '')}"
+end
+
+# Exchange the consumer key and secret for a bearer token (used for
+# application-only authentication)
+# TODO: when twurl supports app-auth, use twurl rather than RestClient
+def get_bearer_token
+  rsp = RestClient::Request.execute(
+    :method => :post,
+    :url => "https://api.twitter.com/oauth2/token",
+    :headers => {"Authorization" => get_basic_authorization_header},
+    :payload => {:grant_type => 'client_credentials'}
+  )
+
+  JSON.parse(rsp.body)["access_token"]
+end
+
+def single_chunk_upload(file_path, bearer_token, api_domain, file_size, content_type, bucket_name)
+  # For docs on RestClient::Request.execute, see
+  # https://github.com/rest-client/rest-client/blob/master/lib/restclient/request.rb
+  rsp = RestClient::Request.execute(
+    :method => :post,
+    :url => "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}",
+    :headers => {
+      "Authorization" => "Bearer #{bearer_token}",
+      "Content-Type" => content_type,
+      "Content-Length" => file_size,
+      "X-TON-Expires" => EXPIRE_TIME
+    },
+    :payload => File.read(file_path)
+  )
+  rsp.headers[:location]
+end
+
+def initiate_multi_part_upload(bearer_token, api_domain, file_size, content_type, bucket_name)
+  rsp = RestClient::Request.execute(
+        :method => :post,
+        :url => "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}?resumable=true",
+        :headers => {
+          "Authorization" => "Bearer #{bearer_token}",
+          "X-TON-Content-Type" => content_type,
+          "X-TON-Content-Length" => file_size,
+          "X-TON-Expires" => EXPIRE_TIME,
+          "Content-Length" => 0
+        }
+      )
+  rsp.headers
+end
+
+def read_file_in_chunks(file_path, chunk_size_in_bytes, file_size) 
+  File.open(file_path) do|file|
+    total_length_read = 0
+    i = 0
+    until file.eof?
+      start_index = total_length_read
+      bytes_to_read = [chunk_size_in_bytes, file_size - total_length_read].min
+      bytes = file.read(bytes_to_read)
+      total_length_read += bytes_to_read
+      i += 1
+      yield i, bytes, start_index, bytes_to_read, total_length_read
+    end
+  end
+end
+
+def multi_chunk_upload(file_path, bearer_token, api_domain, file_size, content_type, bucket_name)
+  puts "Uploading file in multiple chunks..."
+  
+  rsp_headers = initiate_multi_part_upload(bearer_token, api_domain, file_size, content_type, bucket_name)
+  
+  # chunk_size = rsp_headers[:x_ton_min_chunk_size].to_i * (rsp_headers[:x_ton_max_chunk_size].to_i / rsp_headers[:x_ton_min_chunk_size].to_i)
+  chunk_size = rsp_headers[:x_ton_min_chunk_size].to_i
+
+  read_file_in_chunks(file_path, chunk_size, file_size) do |i, buffer, start_index, bytes_to_read, total_length_read|
+    puts "Uploading chunk #{i} (#{start_index}-#{total_length_read-1}/#{file_size})..."
+    RestClient::Request.execute(
+      :method => :put,
+      :url => "https://#{api_domain}#{rsp_headers[:location]}",
+      :headers => {
+        "Authorization" => "Bearer #{bearer_token}",
+        "Content-Type" => content_type,
+        "Content-Length" => bytes_to_read,
+        "Content-Range" => "bytes #{start_index}-#{total_length_read-1}/#{file_size}"
+      },
+      :payload => buffer
+    ){|response, request, result, &block|
+      case response.code
+      when 308
+      else response.return!(request, result, &block)
+      end
+    }
+  end
+  rsp_headers[:location]
+end
+
+# Use the provided bearer token to upload a file on disk to TON.
+# Files that are less than 64MB can be uploaded all at once, though you might break them into smaller chunks as well; 
+# Files that are larger than 64MB must be uploaded in some smaller chunk sizes.
+def upload_to_ton(file_path, bearer_token, api_domain, bucket_name)
+  file_size = File.size(file_path)
+  content_type = MIME::Types.type_for(ARGV.first).first.to_s
+
+  puts "Uploading #{file_path} (#{pretty_size(file_size)}) as #{content_type} via TON API"
+  @rsp_location = 
+    if file_size < SINGLE_CHUNK_UPLOAD_LIMIT_IN_BYTES
+      single_chunk_upload(file_path, bearer_token, api_domain, file_size, content_type, bucket_name)
+    else
+      multi_chunk_upload(file_path, bearer_token, api_domain, file_size, content_type, bucket_name)
+    end
+  puts "File stored at #{@rsp_location}"
+  @rsp_location
+end
+
+# Download a file from TON
+#
+# Can be used to test that a file was uploaded correctly
+def get_from_ton(file_key, bearer_token, api_domain)
+  puts "Downloading the file"
+  rsp = RestClient::Request.execute(
+    :method => :get,
+    :url => "https://#{api_domain}#{file_key}",
+    :headers => {"Authorization" => "Bearer #{bearer_token}"}
+  )
+  puts "Successfully downloaded"
+  File.open(SAMPLE_FILE, 'w') { |file| file.write(rsp) }
+end
+
+def pretty_size(bytes)
+  kb = bytes / 1024
+  mb = bytes / 1024 ** 2
+  mb > 0 ? "#{mb} MB" : "#{kb} KB"
+end
+
+module MODE
+  UPLOAD = "1"
+  UPLOAD_AND_VERIFY = "2"
+  DOWNLOAD = "3"
+end
+
+def parse_args(args)
+  options = {:file_path => nil}
+
+  # Options
+  # --mode | -m 1|2|3
+  # --file | -f <file_path> path of file to be uploaded
+  # --bucket | -b <bucket_name>
+  parser = OptionParser.new do |opts|
+    opts.banner = "\nUsage: #{$0} [options]"
+
+    opts.on('-h', '--help', "Display usage") do |help|
+      puts parser
+      exit
+    end
+
+    # Mode
+    # 1 = UPLOAD, 2 = UPLOAD_AND_VERIFY, 3 = DOWNLOAD
+    opts.on('-m', '--mode <mode>', 'Operating mode, 1 for UPLOAD, 2 for UPLOAD_AND_VERIFY or 3 for DOWNLOAD (required)') do |mode|
+      options[:mode] = mode
+      if (options[:mode] != MODE::UPLOAD && options[:mode] != MODE::UPLOAD_AND_VERIFY && options[:mode] != MODE::DOWNLOAD)
+        puts "ERROR: Invalid or missing mode"
+        exit
+      end
+    end
+
+    # Bucket
+    opts.on('-b', '--bucket <bucket_name>', 'Bucket name for upload (required)') do |bucket_name|
+      unless (/^[a-z_0-9]+$/.match(bucket_name))
+        puts "ERROR: invalid bucket_name"
+        exit
+      end
+      options[:bucket_name] = bucket_name
+    end
+
+    # File path
+    opts.on('-f', '--file <file_path>', 'Path of the file to be uploaded') do |file_path|
+      if File.file?(file_path)
+        options[:file_path] = file_path
+      else
+        puts "ERROR: File not found"
+        exit
+      end
+    end
+  end
+
+  parser.parse!(args)
+  if (options[:mode] != MODE::UPLOAD && options[:mode] != MODE::UPLOAD_AND_VERIFY && options[:mode] != MODE::DOWNLOAD) || (options[:bucket_name].nil?)
+    puts parser
+    exit
+  end
+
+  options
+end
+
+def execute(mode, file_path, bucket_name)
+  api_domain = API_DOMAIN
+
+  bearer_token = get_bearer_token
+  
+  if mode == MODE::UPLOAD
+    upload_to_ton(file_path, bearer_token, api_domain, bucket_name)
+  elsif mode == MODE::UPLOAD_AND_VERIFY
+    file_key = upload_to_ton(file_path, bearer_token, api_domain, bucket_name)
+    get_from_ton(file_key, bearer_token, api_domain, bucket_name)
+
+    # Verifying if downloaded and uploaded files are same
+    actual_md5 = Digest::MD5.hexdigest(File.read("#{SAMPLE_FILE}"))
+    expected_md5 = Digest::MD5.hexdigest(File.read("#{file_path}"))
+    if(actual_md5 == expected_md5)
+      puts("SUCCESS!!! Uploaded and downloaded files match")
+    else
+      puts("SOME ERROR WAS ENCOUNTERED")
+    end
+  elsif mode == MODE::DOWNLOAD
+    get_from_ton(file_path, bearer_token, api_domain, bucket_name)
+  end
+end 
+    
+
+def main(args)
+  abort MISSING_SECRET_ERROR unless CONSUMER_SECRET
+
+  parsed_arguments = parse_args(args)
+  if parsed_arguments[:mode] != MODE::DOWNLOAD && parsed_arguments[:file_path].nil?
+    abort "file path is required for MODE #{parsed_arguments[:mode]}"
+  end
+  execute(parsed_arguments[:mode], parsed_arguments[:file_path], parsed_arguments[:bucket_name])
+end
+
+main(ARGV)
