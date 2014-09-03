@@ -1,10 +1,14 @@
 #!/usr/bin/env ruby -KU -rubygems
 
-# The TON API requires application-only authentication
+# The TON API allows OAuth 1.0A or with whitelisting OAuth 2 (application-only auth)
+# Default is OAuth 1.0A for all applications accessing the TON API.
 #
 # Documentation for doing application-only auth using the Twitter API:
+#   https://dev.twitter.com/docs/auth/3-legged-authorization
 #   https://dev.twitter.com/docs/auth/application-only-auth and
 #   https://dev.twitter.com/docs/api/1.1/post/oauth2/token
+#
+# This script uses the .twurlrc file managed by https://github.com/twitter/twurl
 
 require 'bundler/setup'
 
@@ -17,6 +21,7 @@ require 'rest_client'
 require 'twurl'
 require 'time'
 require 'optparse'
+require 'oauth'
 
 RestClient.log = Logger.new(STDERR)
 
@@ -33,16 +38,43 @@ CONSUMER_SECRET = begin
   profiles.nil? ? nil : profiles[CONSUMER_KEY]["consumer_secret"]
 end
 
+USER_TOKEN = begin
+  name, profiles = Twurl::RCFile.load["profiles"].detect {|k, v| v.include?(CONSUMER_KEY) }
+  profiles.nil? ? nil : profiles[CONSUMER_KEY]["token"]
+end
+
+USER_SECRET = begin
+  name, profiles = Twurl::RCFile.load["profiles"].detect {|k, v| v.include?(CONSUMER_KEY) }
+  profiles.nil? ? nil : profiles[CONSUMER_KEY]["secret"]
+end
+
 MISSING_SECRET_ERROR = "Your ~/.twurlrc does not contain a consumer secret " +
   "for the test application (#{CONSUMER_KEY}). Follow the twurl setup " +
   "instructions and try again."
 
+MISSING_TOKEN_ERROR = "Your ~/.twurlrc does not contain a user token " +
+  "and secret for the application (#{CONSUMER_KEY}). Follow the twurl setup " +
+  "instructions and try again."
+
 # This can go upto 1024*1024*64
-SINGLE_CHUNK_UPLOAD_LIMIT_IN_BYTES = 1024*1024*32
+SINGLE_CHUNK_UPLOAD_LIMIT_IN_BYTES = 1024*1024*64
+
+DOWNLOAD_FILE = 'sample_download_file'
 
 EXPIRE_TIME = (Time.now + 10*24*60*60).httpdate
 
+OAUTH_METHODS = {
+  :post => Net::HTTP::Post,
+  :get => Net::HTTP::Get,
+  :put => Net::HTTP::Put,
+  :delete => Net::HTTP::Delete,
+  :options => Net::HTTP::Options,
+  :head => Net::HTTP::Head,
+  :copy => Net::HTTP::Copy
+}
+
 def get_basic_authorization_header
+  # Used for app-auth only
   credentials = "#{CONSUMER_KEY}:#{CONSUMER_SECRET}"
   "Basic #{Base64.encode64(credentials).gsub("\n", '')}"
 end
@@ -51,6 +83,7 @@ end
 # application-only authentication)
 # TODO: when twurl supports app-auth, use twurl rather than RestClient
 def get_bearer_token
+  # Used for app-auth only
   rsp = RestClient::Request.execute(
     :method => :post,
     :url => "https://api.twitter.com/oauth2/token",
@@ -61,36 +94,47 @@ def get_bearer_token
   JSON.parse(rsp.body)["access_token"]
 end
 
-def single_chunk_upload(file_path, bearer_token, api_domain, file_size, content_type, bucket_name)
-  # For docs on RestClient::Request.execute, see
-  # https://github.com/rest-client/rest-client/blob/master/lib/restclient/request.rb
-  rsp = RestClient::Request.execute(
-    :method => :post,
-    :url => "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}",
-    :headers => {
-      "Authorization" => "Bearer #{bearer_token}",
-      "Content-Type" => content_type,
-      "Content-Length" => file_size,
-      "X-TON-Expires" => EXPIRE_TIME
-    },
-    :payload => File.read(file_path)
-  )
-  rsp.headers[:location]
+def single_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name)
+
+  headers = {
+    'Content-Type' => content_type,
+    'Content-Length' => file_size,
+    'X-TON-Expires' => EXPIRE_TIME
+  }
+
+  url = "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}"
+  body = File.read(file_path)
+
+  if auth_profile[:authmode] == AUTHMODE::USER
+    # User-auth
+    rsp_headers = user_auth_request(headers, :post, auth_profile, api_domain, url, body)
+    rsp_headers[:location]
+  else
+    # App-auth
+    rsp_headers = app_auth_request(headers, :post, auth_profile, url, body)
+    rsp_headers[:location]
+  end
 end
 
-def initiate_multi_part_upload(bearer_token, api_domain, file_size, content_type, bucket_name)
-  rsp = RestClient::Request.execute(
-        :method => :post,
-        :url => "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}?resumable=true",
-        :headers => {
-          "Authorization" => "Bearer #{bearer_token}",
-          "X-TON-Content-Type" => content_type,
-          "X-TON-Content-Length" => file_size,
-          "X-TON-Expires" => EXPIRE_TIME,
-          "Content-Length" => 0
-        }
-      )
-  rsp.headers
+def initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type, bucket_name)
+
+  headers = {
+    'X-TON-Content-Type' => content_type,
+    'X-TON-Content-Length' => file_size,
+    'X-TON-Expires' => EXPIRE_TIME,
+    'Content-Length' => 0
+  }
+
+  url = "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}?resumable=true"
+  body = nil
+
+  if auth_profile[:authmode] == AUTHMODE::USER
+    # User-auth
+    rsp_headers = user_auth_request(headers, :post, auth_profile, api_domain, url, body)
+  else
+    # App-auth
+    rsp_headers = app_auth_request(headers, :post, auth_profile, url, body)
+  end
 end
 
 def read_file_in_chunks(file_path, chunk_size_in_bytes, file_size) 
@@ -108,32 +152,47 @@ def read_file_in_chunks(file_path, chunk_size_in_bytes, file_size)
   end
 end
 
-def multi_chunk_upload(file_path, bearer_token, api_domain, file_size, content_type, bucket_name)
+def multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name)
   puts "Uploading file in multiple chunks..."
+  rsp_headers = initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type, bucket_name)
   
-  rsp_headers = initiate_multi_part_upload(bearer_token, api_domain, file_size, content_type, bucket_name)
-  
-  # chunk_size = rsp_headers[:x_ton_min_chunk_size].to_i * (rsp_headers[:x_ton_max_chunk_size].to_i / rsp_headers[:x_ton_min_chunk_size].to_i)
   chunk_size = rsp_headers[:x_ton_min_chunk_size].to_i
+
+  url = "https://#{api_domain}#{rsp_headers[:location]}"
 
   read_file_in_chunks(file_path, chunk_size, file_size) do |i, buffer, start_index, bytes_to_read, total_length_read|
     puts "Uploading chunk #{i} (#{start_index}-#{total_length_read-1}/#{file_size})..."
-    RestClient::Request.execute(
-      :method => :put,
-      :url => "https://#{api_domain}#{rsp_headers[:location]}",
-      :headers => {
-        "Authorization" => "Bearer #{bearer_token}",
-        "Content-Type" => content_type,
-        "Content-Length" => bytes_to_read,
-        "Content-Range" => "bytes #{start_index}-#{total_length_read-1}/#{file_size}"
-      },
-      :payload => buffer
-    ){|response, request, result, &block|
-      case response.code
-      when 308
-      else response.return!(request, result, &block)
-      end
+
+    headers = {
+      "Content-Type" => content_type,
+      "Content-Length" => bytes_to_read,
+      "Content-Range" => "bytes #{start_index}-#{total_length_read-1}/#{file_size}"
     }
+
+    if auth_profile[:authmode] == AUTHMODE::USER
+      # User-auth
+      chunk_rsp_headers = user_auth_request(headers, :put, auth_profile, api_domain, url, buffer)
+    else
+      # App-auth
+
+      # TODO move to using app_auth_request
+      RestClient::Request.execute(
+        :method => :put,
+        :url => "https://#{api_domain}#{rsp_headers[:location]}",
+        :headers => {
+          "Authorization" => "Bearer #{auth_profile[:bearer_token]}",
+          "Content-Type" => content_type,
+          "Content-Length" => bytes_to_read,
+          "Content-Range" => "bytes #{start_index}-#{total_length_read-1}/#{file_size}"
+        },
+        :payload => buffer
+      ){|response, request, result, &block|
+        case response.code
+        when 308
+        else response.return!(request, result, &block)
+        end
+      }
+    end
   end
   rsp_headers[:location]
 end
@@ -141,16 +200,17 @@ end
 # Use the provided bearer token to upload a file on disk to TON.
 # Files that are less than 64MB can be uploaded all at once, though you might break them into smaller chunks as well; 
 # Files that are larger than 64MB must be uploaded in some smaller chunk sizes.
-def upload_to_ton(file_path, bearer_token, api_domain, bucket_name)
+def upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
   file_size = File.size(file_path)
   content_type = MIME::Types.type_for(ARGV.first).first.to_s
+  content_type = 'text/plain' if content_type.empty?
 
   puts "Uploading #{file_path} (#{pretty_size(file_size)}) as #{content_type} via TON API"
   @rsp_location = 
     if file_size < SINGLE_CHUNK_UPLOAD_LIMIT_IN_BYTES
-      single_chunk_upload(file_path, bearer_token, api_domain, file_size, content_type, bucket_name)
+      single_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name)
     else
-      multi_chunk_upload(file_path, bearer_token, api_domain, file_size, content_type, bucket_name)
+      multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name)
     end
   puts "File stored at #{@rsp_location}"
   @rsp_location
@@ -159,15 +219,16 @@ end
 # Download a file from TON
 #
 # Can be used to test that a file was uploaded correctly
-def get_from_ton(file_key, bearer_token, api_domain)
+def get_from_ton(file_key, auth_profile, api_domain, bucket_name)
+  # TODO update to support user-auth
   puts "Downloading the file"
   rsp = RestClient::Request.execute(
     :method => :get,
-    :url => "https://#{api_domain}#{file_key}",
-    :headers => {"Authorization" => "Bearer #{bearer_token}"}
+    :url => "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}/#{file_key}",
+    :headers => {"Authorization" => "Bearer #{auth_profile[:bearer_token]}"}
   )
   puts "Successfully downloaded"
-  File.open(SAMPLE_FILE, 'w') { |file| file.write(rsp) }
+  File.open(DOWNLOAD_FILE, 'w') { |file| file.write(rsp) }
 end
 
 def pretty_size(bytes)
@@ -182,6 +243,55 @@ module MODE
   DOWNLOAD = "3"
 end
 
+module AUTHMODE
+  USER = "1"
+  APP = "2"
+end
+
+def app_auth_request(headers, method, auth_profile, url, body)
+  # App-auth
+  # For docs on RestClient::Request.execute, see
+  # https://github.com/rest-client/rest-client/blob/master/lib/restclient/request.rb
+
+  headers['Authorization'] = "Bearer #{auth_profile[:bearer_token]}"
+
+  rsp = RestClient::Request.execute(
+    :method => method,
+    :url => url,
+    :headers => headers,
+    :payload => body
+  )
+  rsp.headers
+end
+
+def user_auth_request(headers, method, auth_profile, api_domain, url, body)
+  # User-auth
+  request_class = OAUTH_METHODS.fetch(method)
+  request = request_class.new(url)
+
+  headers.each {|k, v| request[k] = v }
+
+  request.body = body
+
+  consumer = OAuth::Consumer.new(
+    auth_profile[:consumer_key], 
+    auth_profile[:consumer_secret], 
+    :site => "https://#{api_domain}")
+  consumer.http.use_ssl = true
+  consumer.http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+  access_token = OAuth::AccessToken.new(consumer, auth_profile[:token], auth_profile[:secret])
+
+  request.oauth!(consumer.http, consumer, access_token)
+  rsp = consumer.http.request(request)
+
+  rsp_headers = {}
+
+  # Normalize response headers for compatibility with requestclient
+  rsp.each {|k, v| rsp_headers[k.gsub(/\-/, "_").to_sym] = v }
+  rsp_headers
+end
+
 def parse_args(args)
   options = {:file_path => nil}
 
@@ -189,6 +299,7 @@ def parse_args(args)
   # --mode | -m 1|2|3
   # --file | -f <file_path> path of file to be uploaded
   # --bucket | -b <bucket_name>
+  # --app-auth
   parser = OptionParser.new do |opts|
     opts.banner = "\nUsage: #{$0} [options]"
 
@@ -216,7 +327,7 @@ def parse_args(args)
       options[:bucket_name] = bucket_name
     end
 
-    # File path
+    # File path for upload
     opts.on('-f', '--file <file_path>', 'Path of the file to be uploaded') do |file_path|
       if File.file?(file_path)
         options[:file_path] = file_path
@@ -224,6 +335,11 @@ def parse_args(args)
         puts "ERROR: File not found"
         exit
       end
+    end
+
+    # App-auth (by default use user auth)
+    opts.on('--app-auth', 'Use app-auth rather than user-auth') do |app_auth|
+      options[:app_auth] = app_auth
     end
   end
 
@@ -236,19 +352,17 @@ def parse_args(args)
   options
 end
 
-def execute(mode, file_path, bucket_name)
+def execute(mode, auth_profile, file_path, bucket_name)
   api_domain = API_DOMAIN
 
-  bearer_token = get_bearer_token
-  
   if mode == MODE::UPLOAD
-    upload_to_ton(file_path, bearer_token, api_domain, bucket_name)
+    upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
   elsif mode == MODE::UPLOAD_AND_VERIFY
-    file_key = upload_to_ton(file_path, bearer_token, api_domain, bucket_name)
-    get_from_ton(file_key, bearer_token, api_domain, bucket_name)
+    file_key = upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
+    get_from_ton(file_key, auth_profile, api_domain, bucket_name)
 
     # Verifying if downloaded and uploaded files are same
-    actual_md5 = Digest::MD5.hexdigest(File.read("#{SAMPLE_FILE}"))
+    actual_md5 = Digest::MD5.hexdigest(File.read("#{DOWNLOAD_FILE}"))
     expected_md5 = Digest::MD5.hexdigest(File.read("#{file_path}"))
     if(actual_md5 == expected_md5)
       puts("SUCCESS!!! Uploaded and downloaded files match")
@@ -256,10 +370,26 @@ def execute(mode, file_path, bucket_name)
       puts("SOME ERROR WAS ENCOUNTERED")
     end
   elsif mode == MODE::DOWNLOAD
-    get_from_ton(file_path, bearer_token, api_domain, bucket_name)
+    get_from_ton(file_path, auth_profile, api_domain, bucket_name)
   end
 end 
-    
+
+def get_oauth_profile(app_auth)
+  auth_profile = {}
+  if app_auth.nil?
+    # User-auth (OAuth 1.0A)
+    auth_profile[:consumer_key] = CONSUMER_KEY
+    auth_profile[:consumer_secret] = CONSUMER_SECRET
+    auth_profile[:token] = USER_TOKEN
+    auth_profile[:secret] = USER_SECRET
+    auth_profile[:authmode] = AUTHMODE::USER
+  else
+    # App-auth (OAuth 2)
+    auth_profile[:bearer_token] = get_bearer_token
+    auth_profile[:authmode] = AUTHMODE::APP
+  end
+  return auth_profile
+end
 
 def main(args)
   abort MISSING_SECRET_ERROR unless CONSUMER_SECRET
@@ -268,7 +398,12 @@ def main(args)
   if parsed_arguments[:mode] != MODE::DOWNLOAD && parsed_arguments[:file_path].nil?
     abort "file path is required for MODE #{parsed_arguments[:mode]}"
   end
-  execute(parsed_arguments[:mode], parsed_arguments[:file_path], parsed_arguments[:bucket_name])
+
+  abort MISSING_TOKEN_ERROR unless parsed_arguments[:app_auth] || (USER_TOKEN && USER_SECRET)
+
+  auth_profile = get_oauth_profile(parsed_arguments[:app_auth])
+
+  execute(parsed_arguments[:mode], auth_profile, parsed_arguments[:file_path], parsed_arguments[:bucket_name])
 end
 
 main(ARGV)
