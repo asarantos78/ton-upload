@@ -307,17 +307,13 @@ def parse_args(args)
     # Mode
     opts.on('-m', '--mode <mode>', "One of #{OPERATIONS.join(', ')}") do |mode|
       normalized_mode = mode.downcase.to_sym
-      unless OPERATIONS.include?(normalized_mode)
-        abort "ERROR: Unknown mode '#{mode}'"
-      end
+      abort "ERROR: Unknown mode '#{mode}'" unless OPERATIONS.include?(normalized_mode)
       options[:mode] = normalized_mode
     end
 
     # Bucket
     opts.on('-b', '--bucket <bucket_name>', 'Bucket name for upload (required)') do |bucket_name|
-      unless (/^[a-z_0-9]+$/.match(bucket_name))
-        abort "ERROR: invalid bucket_name"
-      end
+      abort "ERROR: invalid bucket_name" unless (/^[a-z_0-9]+$/.match(bucket_name))
       options[:bucket_name] = bucket_name
     end
 
