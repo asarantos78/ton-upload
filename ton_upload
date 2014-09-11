@@ -333,9 +333,12 @@ def parse_args(args)
   end
 
   parser.parse!(args)
-  if options[:mode].nil? || options[:bucket_name].nil?
-    puts parser
-    exit
+
+  warn "Missing required argument --mode" if options[:mode].nil?
+  warn "Missing required argument --bucket" if options[:bucket].nil?
+
+  if options[:bucket_name].nil? || options[:mode].nil?
+    abort parser.to_s
   end
 
   options
