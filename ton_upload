@@ -73,6 +73,12 @@ OAUTH_METHODS = {
   :copy => Net::HTTP::Copy
 }
 
+OPERATIONS = [
+  :upload,
+  :download,
+  :verify_upload
+]
+
 def get_basic_authorization_header
   # Used for app-auth only
   credentials = "#{CONSUMER_KEY}:#{CONSUMER_SECRET}"
@@ -237,12 +243,6 @@ def pretty_size(bytes)
   mb > 0 ? "#{mb} MB" : "#{kb} KB"
 end
 
-module MODE
-  UPLOAD = "1"
-  UPLOAD_AND_VERIFY = "2"
-  DOWNLOAD = "3"
-end
-
 module AUTHMODE
   USER = "1"
   APP = "2"
@@ -296,7 +296,7 @@ def parse_args(args)
   options = {:file_path => nil}
 
   # Options
-  # --mode | -m 1|2|3
+  # --mode | -m upload|download|verify_upload
   # --file | -f <file_path> path of file to be uploaded
   # --bucket | -b <bucket_name>
   # --app-auth
@@ -309,13 +309,13 @@ def parse_args(args)
     end
 
     # Mode
-    # 1 = UPLOAD, 2 = UPLOAD_AND_VERIFY, 3 = DOWNLOAD
-    opts.on('-m', '--mode <mode>', 'Operating mode, 1 for UPLOAD, 2 for UPLOAD_AND_VERIFY or 3 for DOWNLOAD (required)') do |mode|
-      options[:mode] = mode
-      if (options[:mode] != MODE::UPLOAD && options[:mode] != MODE::UPLOAD_AND_VERIFY && options[:mode] != MODE::DOWNLOAD)
-        puts "ERROR: Invalid or missing mode"
+    opts.on('-m', '--mode <mode>', "One of #{OPERATIONS.join(', ')}") do |mode|
+      normalized_mode = mode.downcase.to_sym
+      unless OPERATIONS.include?(normalized_mode)
+        puts "ERROR: Unknown mode '#{mode}'"
         exit
       end
+      options[:mode] = normalized_mode
     end
 
     # Bucket
@@ -344,7 +344,7 @@ def parse_args(args)
   end
 
   parser.parse!(args)
-  if (options[:mode] != MODE::UPLOAD && options[:mode] != MODE::UPLOAD_AND_VERIFY && options[:mode] != MODE::DOWNLOAD) || (options[:bucket_name].nil?)
+  if options[:mode].nil? || options[:bucket_name].nil?
     puts parser
     exit
   end
@@ -355,9 +355,9 @@ end
 def execute(mode, auth_profile, file_path, bucket_name)
   api_domain = API_DOMAIN
 
-  if mode == MODE::UPLOAD
+  if mode == :upload
     upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
-  elsif mode == MODE::UPLOAD_AND_VERIFY
+  elsif mode == :verify_upload
     file_key = upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
     get_from_ton(file_key, auth_profile, api_domain, bucket_name)
 
@@ -369,7 +369,7 @@ def execute(mode, auth_profile, file_path, bucket_name)
     else
       puts("SOME ERROR WAS ENCOUNTERED")
     end
-  elsif mode == MODE::DOWNLOAD
+  elsif mode == :download
     get_from_ton(file_path, auth_profile, api_domain, bucket_name)
   end
 end
@@ -395,8 +395,8 @@ def main(args)
   abort MISSING_SECRET_ERROR unless CONSUMER_SECRET
 
   parsed_arguments = parse_args(args)
-  if parsed_arguments[:mode] != MODE::DOWNLOAD && parsed_arguments[:file_path].nil?
-    abort "file path is required for MODE #{parsed_arguments[:mode]}"
+  if parsed_arguments[:mode] != :download && parsed_arguments[:file_path].nil?
+    abort "file path is required for --mode=#{parsed_arguments[:mode]}"
   end
 
   abort MISSING_TOKEN_ERROR unless parsed_arguments[:app_auth] || (USER_TOKEN && USER_SECRET)
