@@ -202,7 +202,7 @@ end
 # Files that are larger than 64MB must be uploaded in some smaller chunk sizes.
 def upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
   file_size = File.size(file_path)
-  content_type = MIME::Types.type_for(ARGV.first).first.to_s
+  content_type = MIME::Types.type_for(file_path).first.to_s
   content_type = 'text/plain' if content_type.empty?
 
   puts "Uploading #{file_path} (#{pretty_size(file_size)}) as #{content_type} via TON API"
