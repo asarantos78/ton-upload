@@ -137,7 +137,7 @@ def initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type
   end
 end
 
-def read_file_in_chunks(file_path, chunk_size_in_bytes, file_size) 
+def read_file_in_chunks(file_path, chunk_size_in_bytes, file_size)
   File.open(file_path) do|file|
     total_length_read = 0
     i = 0
@@ -155,7 +155,7 @@ end
 def multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name)
   puts "Uploading file in multiple chunks..."
   rsp_headers = initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type, bucket_name)
-  
+
   chunk_size = rsp_headers[:x_ton_min_chunk_size].to_i
 
   url = "https://#{api_domain}#{rsp_headers[:location]}"
@@ -198,7 +198,7 @@ def multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_t
 end
 
 # Use the provided bearer token to upload a file on disk to TON.
-# Files that are less than 64MB can be uploaded all at once, though you might break them into smaller chunks as well; 
+# Files that are less than 64MB can be uploaded all at once, though you might break them into smaller chunks as well;
 # Files that are larger than 64MB must be uploaded in some smaller chunk sizes.
 def upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
   file_size = File.size(file_path)
@@ -206,7 +206,7 @@ def upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
   content_type = 'text/plain' if content_type.empty?
 
   puts "Uploading #{file_path} (#{pretty_size(file_size)}) as #{content_type} via TON API"
-  @rsp_location = 
+  @rsp_location =
     if file_size < SINGLE_CHUNK_UPLOAD_LIMIT_IN_BYTES
       single_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name)
     else
@@ -274,8 +274,8 @@ def user_auth_request(headers, method, auth_profile, api_domain, url, body)
   request.body = body
 
   consumer = OAuth::Consumer.new(
-    auth_profile[:consumer_key], 
-    auth_profile[:consumer_secret], 
+    auth_profile[:consumer_key],
+    auth_profile[:consumer_secret],
     :site => "https://#{api_domain}")
   consumer.http.use_ssl = true
   consumer.http.verify_mode = OpenSSL::SSL::VERIFY_NONE
@@ -372,7 +372,7 @@ def execute(mode, auth_profile, file_path, bucket_name)
   elsif mode == MODE::DOWNLOAD
     get_from_ton(file_path, auth_profile, api_domain, bucket_name)
   end
-end 
+end
 
 def get_oauth_profile(app_auth)
   auth_profile = {}
