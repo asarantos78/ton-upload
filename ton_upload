@@ -79,6 +79,11 @@ OPERATIONS = [
   :verify_upload
 ]
 
+module AUTHMODE
+  USER = "1"
+  APP = "2"
+end
+
 def get_basic_authorization_header
   # Used for app-auth only
   credentials = "#{CONSUMER_KEY}:#{CONSUMER_SECRET}"
@@ -241,11 +246,6 @@ def pretty_size(bytes)
   kb = bytes / 1024
   mb = bytes / 1024 ** 2
   mb > 0 ? "#{mb} MB" : "#{kb} KB"
-end
-
-module AUTHMODE
-  USER = "1"
-  APP = "2"
 end
 
 def app_auth_request(headers, method, auth_profile, url, body)
