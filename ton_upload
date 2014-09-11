@@ -303,10 +303,7 @@ def parse_args(args)
   parser = OptionParser.new do |opts|
     opts.banner = "\nUsage: #{$0} [options]"
 
-    opts.on('-h', '--help', "Display usage") do |help|
-      puts parser
-      exit
-    end
+    opts.on('-h', '--help', "Display usage")
 
     # Mode
     opts.on('-m', '--mode <mode>', "One of #{OPERATIONS.join(', ')}") do |mode|
