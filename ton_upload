@@ -79,7 +79,7 @@ OPERATIONS = [
   :verify_upload
 ]
 
-module AUTHMODE
+module AuthenticationMode
   USER = "1"
   APP = "2"
 end
@@ -116,7 +116,7 @@ def single_chunk_upload(file_path, auth_profile, api_domain, file_size, content_
   url = "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}"
   body = File.read(file_path)
 
-  if auth_profile[:authmode] == AUTHMODE::USER
+  if auth_profile[:authmode] == AuthenticationMode::USER
     # User-auth
     rsp_headers = user_auth_request(headers, :post, auth_profile, api_domain, url, body)
     rsp_headers[:location]
@@ -139,7 +139,7 @@ def initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type
   url = "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}?resumable=true"
   body = nil
 
-  if auth_profile[:authmode] == AUTHMODE::USER
+  if auth_profile[:authmode] == AuthenticationMode::USER
     # User-auth
     rsp_headers = user_auth_request(headers, :post, auth_profile, api_domain, url, body)
   else
@@ -180,7 +180,7 @@ def multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_t
       "Content-Range" => "bytes #{start_index}-#{total_length_read-1}/#{file_size}"
     }
 
-    if auth_profile[:authmode] == AUTHMODE::USER
+    if auth_profile[:authmode] == AuthenticationMode::USER
       # User-auth
       chunk_rsp_headers = user_auth_request(headers, :put, auth_profile, api_domain, url, buffer)
     else
@@ -376,11 +376,11 @@ def get_oauth_profile(app_auth)
     auth_profile[:consumer_secret] = CONSUMER_SECRET
     auth_profile[:token] = USER_TOKEN
     auth_profile[:secret] = USER_SECRET
-    auth_profile[:authmode] = AUTHMODE::USER
+    auth_profile[:authmode] = AuthenticationMode::USER
   else
     # App-auth (OAuth 2)
     auth_profile[:bearer_token] = get_bearer_token
-    auth_profile[:authmode] = AUTHMODE::APP
+    auth_profile[:authmode] = AuthenticationMode::APP
   end
   return auth_profile
 end
