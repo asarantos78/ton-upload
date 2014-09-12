@@ -16,7 +16,6 @@ require 'digest/md5'
 require 'json'
 require 'logger'
 require 'mime/types'
-require 'oauth'
 require 'rest_client'
 require 'twurl'
 require 'time'
@@ -73,6 +72,17 @@ OAUTH_METHODS = {
   :copy => Net::HTTP::Copy
 }
 
+OPERATIONS = [
+  :upload,
+  :download,
+  :verify_upload
+]
+
+module AuthenticationMode
+  USER = "1"
+  APP = "2"
+end
+
 def get_basic_authorization_header
   # Used for app-auth only
   credentials = "#{CONSUMER_KEY}:#{CONSUMER_SECRET}"
@@ -105,7 +115,7 @@ def single_chunk_upload(file_path, auth_profile, api_domain, file_size, content_
   url = "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}"
   body = File.read(file_path)
 
-  if auth_profile[:authmode] == AUTHMODE::USER
+  if auth_profile[:authmode] == AuthenticationMode::USER
     # User-auth
     rsp_headers = user_auth_request(headers, :post, auth_profile, api_domain, url, body)
     rsp_headers[:location]
@@ -128,7 +138,7 @@ def initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type
   url = "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}?resumable=true"
   body = nil
 
-  if auth_profile[:authmode] == AUTHMODE::USER
+  if auth_profile[:authmode] == AuthenticationMode::USER
     # User-auth
     rsp_headers = user_auth_request(headers, :post, auth_profile, api_domain, url, body)
   else
@@ -169,7 +179,7 @@ def multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_t
       "Content-Range" => "bytes #{start_index}-#{total_length_read-1}/#{file_size}"
     }
 
-    if auth_profile[:authmode] == AUTHMODE::USER
+    if auth_profile[:authmode] == AuthenticationMode::USER
       # User-auth
       chunk_rsp_headers = user_auth_request(headers, :put, auth_profile, api_domain, url, buffer)
     else
@@ -237,17 +247,6 @@ def pretty_size(bytes)
   mb > 0 ? "#{mb} MB" : "#{kb} KB"
 end
 
-module MODE
-  UPLOAD = "1"
-  UPLOAD_AND_VERIFY = "2"
-  DOWNLOAD = "3"
-end
-
-module AUTHMODE
-  USER = "1"
-  APP = "2"
-end
-
 def app_auth_request(headers, method, auth_profile, url, body)
   # App-auth
   # For docs on RestClient::Request.execute, see
@@ -296,34 +295,25 @@ def parse_args(args)
   options = {:file_path => nil}
 
   # Options
-  # --mode | -m 1|2|3
+  # --mode | -m upload|download|verify_upload
   # --file | -f <file_path> path of file to be uploaded
   # --bucket | -b <bucket_name>
   # --app-auth
   parser = OptionParser.new do |opts|
     opts.banner = "\nUsage: #{$0} [options]"
 
-    opts.on('-h', '--help', "Display usage") do |help|
-      puts parser
-      exit
-    end
+    opts.on('-h', '--help', "Display usage")
 
     # Mode
-    # 1 = UPLOAD, 2 = UPLOAD_AND_VERIFY, 3 = DOWNLOAD
-    opts.on('-m', '--mode <mode>', 'Operating mode, 1 for UPLOAD, 2 for UPLOAD_AND_VERIFY or 3 for DOWNLOAD (required)') do |mode|
-      options[:mode] = mode
-      if (options[:mode] != MODE::UPLOAD && options[:mode] != MODE::UPLOAD_AND_VERIFY && options[:mode] != MODE::DOWNLOAD)
-        puts "ERROR: Invalid or missing mode"
-        exit
-      end
+    opts.on('-m', '--mode <mode>', "One of #{OPERATIONS.join(', ')}") do |mode|
+      normalized_mode = mode.downcase.to_sym
+      abort "ERROR: Unknown mode '#{mode}'" unless OPERATIONS.include?(normalized_mode)
+      options[:mode] = normalized_mode
     end
 
     # Bucket
     opts.on('-b', '--bucket <bucket_name>', 'Bucket name for upload (required)') do |bucket_name|
-      unless (/^[a-z_0-9]+$/.match(bucket_name))
-        puts "ERROR: invalid bucket_name"
-        exit
-      end
+      abort "ERROR: invalid bucket_name" unless (/^[a-z_0-9]+$/.match(bucket_name))
       options[:bucket_name] = bucket_name
     end
 
@@ -332,8 +322,7 @@ def parse_args(args)
       if File.file?(file_path)
         options[:file_path] = file_path
       else
-        puts "ERROR: File not found"
-        exit
+        abort "ERROR: File not found"
       end
     end
 
@@ -344,9 +333,12 @@ def parse_args(args)
   end
 
   parser.parse!(args)
-  if (options[:mode] != MODE::UPLOAD && options[:mode] != MODE::UPLOAD_AND_VERIFY && options[:mode] != MODE::DOWNLOAD) || (options[:bucket_name].nil?)
-    puts parser
-    exit
+
+  warn "Missing required argument --mode" if options[:mode].nil?
+  warn "Missing required argument --bucket" if options[:bucket].nil?
+
+  if options[:bucket_name].nil? || options[:mode].nil?
+    abort parser.to_s
   end
 
   options
@@ -355,9 +347,9 @@ end
 def execute(mode, auth_profile, file_path, bucket_name)
   api_domain = API_DOMAIN
 
-  if mode == MODE::UPLOAD
+  if mode == :upload
     upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
-  elsif mode == MODE::UPLOAD_AND_VERIFY
+  elsif mode == :verify_upload
     file_key = upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
     get_from_ton(file_key, auth_profile, api_domain, bucket_name)
 
@@ -369,7 +361,7 @@ def execute(mode, auth_profile, file_path, bucket_name)
     else
       puts("SOME ERROR WAS ENCOUNTERED")
     end
-  elsif mode == MODE::DOWNLOAD
+  elsif mode == :download
     get_from_ton(file_path, auth_profile, api_domain, bucket_name)
   end
 end
@@ -382,11 +374,11 @@ def get_oauth_profile(app_auth)
     auth_profile[:consumer_secret] = CONSUMER_SECRET
     auth_profile[:token] = USER_TOKEN
     auth_profile[:secret] = USER_SECRET
-    auth_profile[:authmode] = AUTHMODE::USER
+    auth_profile[:authmode] = AuthenticationMode::USER
   else
     # App-auth (OAuth 2)
     auth_profile[:bearer_token] = get_bearer_token
-    auth_profile[:authmode] = AUTHMODE::APP
+    auth_profile[:authmode] = AuthenticationMode::APP
   end
   return auth_profile
 end
@@ -395,8 +387,8 @@ def main(args)
   abort MISSING_SECRET_ERROR unless CONSUMER_SECRET
 
   parsed_arguments = parse_args(args)
-  if parsed_arguments[:mode] != MODE::DOWNLOAD && parsed_arguments[:file_path].nil?
-    abort "file path is required for MODE #{parsed_arguments[:mode]}"
+  if parsed_arguments[:mode] != :download && parsed_arguments[:file_path].nil?
+    abort "file path is required for --mode=#{parsed_arguments[:mode]}"
   end
 
   abort MISSING_TOKEN_ERROR unless parsed_arguments[:app_auth] || (USER_TOKEN && USER_SECRET)
