@@ -104,7 +104,7 @@ def get_bearer_token
   JSON.parse(rsp.body)["access_token"]
 end
 
-def single_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name)
+def single_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name, trace)
 
   headers = {
     'Content-Type' => content_type,
@@ -117,16 +117,16 @@ def single_chunk_upload(file_path, auth_profile, api_domain, file_size, content_
 
   if auth_profile[:authmode] == AuthenticationMode::USER
     # User-auth
-    rsp_headers = user_auth_request(headers, :post, auth_profile, api_domain, url, body)
+    rsp_headers = user_auth_request(headers, :post, auth_profile, trace, api_domain, url, body)
     rsp_headers[:location]
   else
     # App-auth
-    rsp_headers = app_auth_request(headers, :post, auth_profile, url, body)
+    rsp_headers = app_auth_request(headers, :post, trace, auth_profile, url, body)
     rsp_headers[:location]
   end
 end
 
-def initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type, bucket_name)
+def initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type, bucket_name, trace)
 
   headers = {
     'X-TON-Content-Type' => content_type,
@@ -140,10 +140,10 @@ def initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type
 
   if auth_profile[:authmode] == AuthenticationMode::USER
     # User-auth
-    rsp_headers = user_auth_request(headers, :post, auth_profile, api_domain, url, body)
+    rsp_headers = user_auth_request(headers, :post, auth_profile, trace, api_domain, url, body)
   else
     # App-auth
-    rsp_headers = app_auth_request(headers, :post, auth_profile, url, body)
+    rsp_headers = app_auth_request(headers, :post, auth_profile, trace, url, body)
   end
 end
 
@@ -162,9 +162,9 @@ def read_file_in_chunks(file_path, chunk_size_in_bytes, file_size)
   end
 end
 
-def multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name)
+def multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name, trace)
   puts "Uploading file in multiple chunks..."
-  rsp_headers = initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type, bucket_name)
+  rsp_headers = initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type, bucket_name, trace)
 
   chunk_size = rsp_headers[:x_ton_min_chunk_size].to_i
 
@@ -181,7 +181,7 @@ def multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_t
 
     if auth_profile[:authmode] == AuthenticationMode::USER
       # User-auth
-      chunk_rsp_headers = user_auth_request(headers, :put, auth_profile, api_domain, url, buffer)
+      chunk_rsp_headers = user_auth_request(headers, :put, auth_profile, trace, api_domain, url, buffer)
     else
       # App-auth
 
@@ -210,7 +210,7 @@ end
 # Use the provided bearer token to upload a file on disk to TON.
 # Files that are less than 64MB can be uploaded all at once, though you might break them into smaller chunks as well;
 # Files that are larger than 64MB must be uploaded in some smaller chunk sizes.
-def upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
+def upload_to_ton(file_path, auth_profile, api_domain, bucket_name, trace)
   file_size = File.size(file_path)
   content_type = MIME::Types.type_for(file_path).first.to_s
   content_type = 'text/plain' if content_type.empty?
@@ -218,9 +218,9 @@ def upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
   puts "Uploading #{file_path} (#{pretty_size(file_size)}) as #{content_type} via TON API"
   @rsp_location =
     if file_size < SINGLE_CHUNK_UPLOAD_LIMIT_IN_BYTES
-      single_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name)
+      single_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name, trace)
     else
-      multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name)
+      multi_chunk_upload(file_path, auth_profile, api_domain, file_size, content_type, bucket_name, trace)
     end
   puts "File stored at #{@rsp_location}"
   @rsp_location
@@ -229,8 +229,9 @@ end
 # Download a file from TON
 #
 # Can be used to test that a file was uploaded correctly
-def get_from_ton(file_key, auth_profile, api_domain, bucket_name)
+def get_from_ton(file_key, auth_profile, api_domain, bucket_name, trace)
   # TODO update to support user-auth
+  # TODO trace not implemented without user-auth
   puts "Downloading the file"
   rsp = RestClient::Request.execute(
     :method => :get,
@@ -263,7 +264,7 @@ def app_auth_request(headers, method, auth_profile, url, body)
   rsp.headers
 end
 
-def user_auth_request(headers, method, auth_profile, api_domain, url, body)
+def user_auth_request(headers, method, auth_profile, trace, api_domain, url, body)
   # User-auth
   request_class = OAUTH_METHODS.fetch(method)
   request = request_class.new(url)
@@ -277,6 +278,7 @@ def user_auth_request(headers, method, auth_profile, api_domain, url, body)
     auth_profile[:consumer_secret],
     :site => "https://#{api_domain}")
   consumer.http.use_ssl = true
+  consumer.http.set_debug_output(STDERR) if trace
   consumer.http.verify_mode = OpenSSL::SSL::VERIFY_NONE
 
   access_token = OAuth::AccessToken.new(consumer, auth_profile[:token], auth_profile[:secret])
@@ -330,6 +332,10 @@ def parse_args(args)
     opts.on('--app-auth', 'Use app-auth rather than user-auth') do |app_auth|
       options[:app_auth] = app_auth
     end
+
+    opts.on('-t', '--trace', 'Trace request/response traffic') do |trace|
+      options[:trace] = trace
+    end
   end
 
   parser.parse!(args)
@@ -344,14 +350,14 @@ def parse_args(args)
   options
 end
 
-def execute(mode, auth_profile, file_path, bucket_name)
+def execute(mode, trace, auth_profile, file_path, bucket_name)
   api_domain = API_DOMAIN
 
   if mode == :upload
-    upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
+    upload_to_ton(file_path, auth_profile, api_domain, bucket_name, trace)
   elsif mode == :verify_upload
-    file_key = upload_to_ton(file_path, auth_profile, api_domain, bucket_name)
-    get_from_ton(file_key, auth_profile, api_domain, bucket_name)
+    file_key = upload_to_ton(file_path, auth_profile, api_domain, bucket_name, trace)
+    get_from_ton(file_key, auth_profile, api_domain, bucket_name, trace)
 
     # Verifying if downloaded and uploaded files are same
     actual_md5 = Digest::MD5.hexdigest(File.read("#{DOWNLOAD_FILE}"))
@@ -362,7 +368,7 @@ def execute(mode, auth_profile, file_path, bucket_name)
       puts("SOME ERROR WAS ENCOUNTERED")
     end
   elsif mode == :download
-    get_from_ton(file_path, auth_profile, api_domain, bucket_name)
+    get_from_ton(file_path, auth_profile, api_domain, bucket_name, trace)
   end
 end
 
@@ -395,7 +401,7 @@ def main(args)
 
   auth_profile = get_oauth_profile(parsed_arguments[:app_auth])
 
-  execute(parsed_arguments[:mode], auth_profile, parsed_arguments[:file_path], parsed_arguments[:bucket_name])
+  execute(parsed_arguments[:mode], parsed_arguments[:trace], auth_profile, parsed_arguments[:file_path], parsed_arguments[:bucket_name])
 end
 
 main(ARGV)
