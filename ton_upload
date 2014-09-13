@@ -341,7 +341,7 @@ def parse_args(args)
   parser.parse!(args)
 
   warn "Missing required argument --mode" if options[:mode].nil?
-  warn "Missing required argument --bucket" if options[:bucket].nil?
+  warn "Missing required argument --bucket" if options[:bucket_name].nil?
 
   if options[:bucket_name].nil? || options[:mode].nil?
     abort parser.to_s
