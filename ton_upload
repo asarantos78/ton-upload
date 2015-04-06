@@ -56,7 +56,7 @@ MISSING_TOKEN_ERROR = "Your ~/.twurlrc does not contain a user token " +
   "instructions and try again."
 
 # This can go upto 1024*1024*64
-SINGLE_CHUNK_UPLOAD_LIMIT_IN_BYTES = 1024*1024*64
+SINGLE_CHUNK_UPLOAD_LIMIT_IN_BYTES = 1024*1024*10
 
 DOWNLOAD_FILE = 'sample_download_file'
 
@@ -132,7 +132,8 @@ def initiate_multi_part_upload(auth_profile, api_domain, file_size, content_type
     'X-TON-Content-Type' => content_type,
     'X-TON-Content-Length' => file_size,
     'X-TON-Expires' => EXPIRE_TIME,
-    'Content-Length' => 0
+    'Content-Length' => 0,
+    'Content-Type' => content_type
   }
 
   url = "https://#{api_domain}/1.1/ton/bucket/#{bucket_name}?resumable=true"
