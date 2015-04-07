@@ -26,26 +26,15 @@ RestClient.log = Logger.new(STDERR)
 
 API_DOMAIN = "ton.twitter.com"
 
-CONSUMER_KEY = begin
-  profile = Twurl::RCFile.load["configuration"]
-  key = profile["default_profile"][1]
-  key.nil? ? nil : key
+DEFAULT_PROFILE = begin
+  default = Twurl::RCFile.load["configuration"]["default_profile"]
+  profile = Twurl::OAuthClient.load_client_for_username_and_consumer_key(default[0], default[1])
 end
 
-CONSUMER_SECRET = begin
-  name, profiles = Twurl::RCFile.load["profiles"].detect {|k, v| v.include?(CONSUMER_KEY) }
-  profiles.nil? ? nil : profiles[CONSUMER_KEY]["consumer_secret"]
-end
-
-USER_TOKEN = begin
-  name, profiles = Twurl::RCFile.load["profiles"].detect {|k, v| v.include?(CONSUMER_KEY) }
-  profiles.nil? ? nil : profiles[CONSUMER_KEY]["token"]
-end
-
-USER_SECRET = begin
-  name, profiles = Twurl::RCFile.load["profiles"].detect {|k, v| v.include?(CONSUMER_KEY) }
-  profiles.nil? ? nil : profiles[CONSUMER_KEY]["secret"]
-end
+CONSUMER_KEY    = DEFAULT_PROFILE.consumer_key
+CONSUMER_SECRET = DEFAULT_PROFILE.consumer_secret
+USER_TOKEN      = DEFAULT_PROFILE.token
+USER_SECRET     = DEFAULT_PROFILE.secret
 
 MISSING_SECRET_ERROR = "Your ~/.twurlrc does not contain a consumer secret " +
   "for the test application (#{CONSUMER_KEY}). Follow the twurl setup " +
